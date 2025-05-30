@@ -700,6 +700,45 @@ func (q *Queries) UpdateChapter(ctx context.Context, arg UpdateChapterParams) (C
 	return i, err
 }
 
+const updateGeneratedDocument = `-- name: UpdateGeneratedDocument :one
+UPDATE generated_documents
+SET file_name = $2, file_path = $3, file_size = $4, mime_type = $5, status = $6
+WHERE id = $1
+RETURNING id, project_id, file_name, file_path, file_size, mime_type, status, created_at
+`
+
+type UpdateGeneratedDocumentParams struct {
+	ID       pgtype.UUID `db:"id" json:"id"`
+	FileName string      `db:"file_name" json:"file_name"`
+	FilePath string      `db:"file_path" json:"file_path"`
+	FileSize pgtype.Int8 `db:"file_size" json:"file_size"`
+	MimeType pgtype.Text `db:"mime_type" json:"mime_type"`
+	Status   pgtype.Text `db:"status" json:"status"`
+}
+
+func (q *Queries) UpdateGeneratedDocument(ctx context.Context, arg UpdateGeneratedDocumentParams) (GeneratedDocument, error) {
+	row := q.db.QueryRow(ctx, updateGeneratedDocument,
+		arg.ID,
+		arg.FileName,
+		arg.FilePath,
+		arg.FileSize,
+		arg.MimeType,
+		arg.Status,
+	)
+	var i GeneratedDocument
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.FileName,
+		&i.FilePath,
+		&i.FileSize,
+		&i.MimeType,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const updateGeneratedDocumentStatus = `-- name: UpdateGeneratedDocumentStatus :one
 UPDATE generated_documents
 SET status = $2
