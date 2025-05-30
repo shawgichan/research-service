@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+python-docx
+pydantic
+python-dotenv # For local .env loading
+requests # If it needs to call back to Go service for anything (unlikely for doc gen)

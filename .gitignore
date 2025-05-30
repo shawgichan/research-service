@@ -1,1 +1,4 @@
 app.env
+venv/
+generated_documents/
+__pycache__/
