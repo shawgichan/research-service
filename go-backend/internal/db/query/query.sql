@@ -150,6 +150,12 @@ SET status = $2
 WHERE id = $1
 RETURNING *;
 
+-- name: UpdateGeneratedDocument :one
+UPDATE generated_documents
+SET file_name = $2, file_path = $3, file_size = $4, mime_type = $5, status = $6
+WHERE id = $1
+RETURNING *;
+
 -- name: DeleteGeneratedDocument :exec
 DELETE FROM generated_documents
 WHERE id = $1;

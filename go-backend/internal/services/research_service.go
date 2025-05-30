@@ -1,10 +1,14 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,6 +37,34 @@ type ResearchService struct {
 	store     db.Store
 	aiService *AIService
 	logger    *applogger.AppLogger
+}
+
+// Add Python service URL to config or as a constant
+const pythonDocGenServiceURL = "http://localhost:8001" // Change if using Docker Compose service name
+const OUTPUT_DIR_FOR_GO = ""
+
+type PythonDocGenRequest struct {
+	ProjectID         uuid.UUID              `json:"project_id"`
+	ResearchTitle     string                 `json:"research_title"`
+	StudentName       string                 `json:"student_name,omitempty"`
+	UniversityName    string                 `json:"university_name,omitempty"`
+	Specialization    string                 `json:"specialization,omitempty"`
+	Chapters          []PythonChapterData    `json:"chapters"`
+	References        []PythonReferenceData  `json:"references,omitempty"`
+	FormattingOptions map[string]interface{} `json:"formatting_options,omitempty"`
+}
+type PythonChapterData struct {
+	Type    string `json:"type"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+type PythonReferenceData struct {
+	CitationAPA string `json:"citation_apa,omitempty"`
+}
+type PythonDocGenResponse struct { // Matches Python service response
+	ProjectID uuid.UUID `json:"project_id"`
+	FileName  string    `json:"file_name"`
+	Message   string    `json:"message"`
 }
 
 func NewResearchService(store db.Store, aiService *AIService, logger *applogger.AppLogger) *ResearchService {
@@ -520,14 +552,12 @@ func derefInt(i *int) int {
 
 // Placeholder for document generation service integration
 func (s *ResearchService) GenerateDocument(ctx context.Context, projectID, userID uuid.UUID) (sqlc.GeneratedDocument, error) {
-	s.logger.Info("Generating document for project", "projectID", projectID, "userID", userID)
-	_, err := s.GetUserProjectByID(ctx, projectID, userID)
+	s.logger.Info("Initiating document generation process", "projectID", projectID, "userID", userID)
+	project, err := s.GetUserProjectByID(ctx, projectID, userID)
 	if err != nil {
 		return sqlc.GeneratedDocument{}, err
 	}
 
-	// TODO: Implement actual document generation logic (e.g., call Python microservice)
-	// For now, create a placeholder record in generated_documents table
 	mockFileName := fmt.Sprintf("project_%s_thesis.docx", projectID.String()[:8])
 	mockFilePath := fmt.Sprintf("/generated_docs/%s", mockFileName)
 
@@ -535,46 +565,134 @@ func (s *ResearchService) GenerateDocument(ctx context.Context, projectID, userI
 		ProjectID: pgtype.UUID{Bytes: projectID, Valid: true},
 		FileName:  mockFileName,
 		FilePath:  mockFilePath,
-		FileSize:  pgtype.Int8{Int64: 10240, Valid: true}, // 10KB placeholder
-		MimeType:  pgtype.Text{String: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", Valid: true},
+		// FileSize:  pgtype.Int8{Int64: 10240, Valid: true}, // 10KB placeholder
+		// MimeType:  pgtype.Text{String: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", Valid: true},
 		// Status defaults to 'processing'
 	}
-	doc, err := s.store.CreateGeneratedDocument(ctx, docParams)
+	dbDoc, err := s.store.CreateGeneratedDocument(ctx, docParams)
 	if err != nil {
 		s.logger.Error("Failed to create generated document record", "projectID", projectID, "error", err)
 		return sqlc.GeneratedDocument{}, fmt.Errorf("could not create document record: %w", err)
 	}
-
-	// Simulate processing and update status
-	// In a real app, this would be async and update upon completion/failure
-	go func() {
-		time.Sleep(5 * time.Second) // Simulate generation time
-		_, updateErr := s.store.UpdateGeneratedDocumentStatus(context.Background(), sqlc.UpdateGeneratedDocumentStatusParams{
-			ID:     doc.ID,
-			Status: pgtype.Text{String: "completed", Valid: true},
-		})
-		if updateErr != nil {
-			s.logger.Error("Failed to update document status post-generation", "docID", doc.ID, "error", updateErr)
+	// Gather data for Python service
+	chaptersDB, err := s.store.GetChaptersByProjectID(ctx, pgtype.UUID{Bytes: projectID, Valid: true})
+	if err != nil {
+		s.updateDocStatus(ctx, dbDoc.ID.Bytes, "failed", "Error fetching chapters")
+		return dbDoc, fmt.Errorf("failed to fetch chapters for doc gen: %w", err)
+	}
+	var chaptersPy []PythonChapterData
+	for _, ch := range chaptersDB {
+		if ch.Status.String == "approved" || ch.Status.String == "generated" { // Only include approved/generated chapters
+			chaptersPy = append(chaptersPy, PythonChapterData{
+				Type:    ch.Type,
+				Title:   ch.Title,
+				Content: ch.Content.String,
+			})
 		}
-	}()
+	}
 
-	s.logger.Info("Document generation process initiated", "docID", doc.ID)
-	return doc, nil
+	referencesDB, err := s.store.GetReferencesByProjectID(ctx, pgtype.UUID{Bytes: projectID, Valid: true})
+	if err != nil {
+		s.updateDocStatus(ctx, dbDoc.ID.Bytes, "failed", "Error fetching references")
+		return dbDoc, fmt.Errorf("failed to fetch references for doc gen: %w", err)
+	}
+	var referencesPy []PythonReferenceData
+	for _, ref := range referencesDB {
+		if ref.CitationApa.Valid {
+			referencesPy = append(referencesPy, PythonReferenceData{CitationAPA: ref.CitationApa.String})
+		}
+	}
+
+	pythonReqPayload := PythonDocGenRequest{
+		ProjectID:      project.ID.Bytes,
+		ResearchTitle:  project.Title,
+		StudentName:    "A. User", // Get from user profile later
+		UniversityName: project.University.String,
+		Specialization: project.Specialization,
+		Chapters:       chaptersPy,
+		References:     referencesPy,
+		FormattingOptions: map[string]interface{}{ // Default formatting
+			"font_family":    "Times New Roman",
+			"font_size_main": 12,
+			"line_spacing":   1.5,
+		},
+	}
+
+	jsonData, err := json.Marshal(pythonReqPayload)
+	if err != nil {
+		s.updateDocStatus(ctx, dbDoc.ID.Bytes, "failed", "Error marshalling request for Python service")
+		return dbDoc, fmt.Errorf("failed to marshal python request: %w", err)
+	}
+
+	// Make HTTP call to Python service (synchronous for MVP simplicity)
+	pythonServiceURL := "" //s.config.PythonDocGenServiceURL // Add this to your Go config
+	if pythonServiceURL == "" {
+		pythonServiceURL = "http://localhost:8001/generate-document" // Default for local
+	}
+
+	s.logger.Info("Calling Python document generation service", "url", pythonServiceURL)
+	httpClient := &http.Client{Timeout: 2 * time.Minute} // Generous timeout for doc gen
+	resp, err := httpClient.Post(pythonServiceURL, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		s.logger.Error("Failed to call Python document generation service", "error", err)
+		s.updateDocStatus(ctx, dbDoc.ID.Bytes, "failed", fmt.Sprintf("Python service call error: %v", err))
+		return dbDoc, fmt.Errorf("python service call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK { // FastAPI might return 202 or 200
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		errMsg := fmt.Sprintf("Python service returned error: %s, Body: %s", resp.Status, string(bodyBytes))
+		s.logger.Error(errMsg)
+		s.updateDocStatus(ctx, dbDoc.ID.Bytes, "failed", fmt.Sprintf("Python service error: %s", resp.Status))
+		return dbDoc, fmt.Errorf(errMsg)
+	}
+
+	var pyResp PythonDocGenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pyResp); err != nil {
+		s.logger.Error("Failed to decode response from Python service", "error", err)
+		s.updateDocStatus(ctx, dbDoc.ID.Bytes, "failed", "Python service response decode error")
+		return dbDoc, fmt.Errorf("python service decode error: %w", err)
+	}
+
+	// If successful, update DB record with file name and path
+	// The Python service saves to a known location pattern or a shared volume.
+	// The Go service constructs the path it knows the Python service used.
+	// Example: /app/generated_documents in Python container, mapped to ./data/generated_documents on host
+	// Go service needs to know this host path to serve the file.
+	// For Docker, the path would be relative to a shared volume.
+	generatedFilePath := fmt.Sprintf("%s/%s", OUTPUT_DIR_FOR_GO, pyResp.FileName) // OUTPUT_DIR_FOR_GO is the path Go uses to access the file
+
+	_, err = s.store.UpdateGeneratedDocument(ctx, sqlc.UpdateGeneratedDocumentParams{ // Assuming you add this query
+		ID:       dbDoc.ID,
+		FileName: pyResp.FileName,
+		FilePath: generatedFilePath,
+		Status:   pgtype.Text{String: "completed", Valid: true},
+		//FileSize:  // Python could return this, or Go could stat the file
+	})
+	if err != nil {
+		s.logger.Error("Failed to update document record to completed", "docID", dbDoc.ID, "error", err)
+		// Log error but client already got a positive response from Python (potentially)
+		// This part is tricky with synchronous calls. An async approach is better.
+	}
+	dbDoc.FileName = pyResp.FileName
+	dbDoc.FilePath = generatedFilePath
+	dbDoc.Status = pgtype.Text{String: "completed", Valid: true}
+
+	s.logger.Info("Document generation request processed by Python service.", "docID", dbDoc.ID, "fileName", pyResp.FileName)
+	return dbDoc, nil
 }
 
-func (s *ResearchService) GetGeneratedDocument(ctx context.Context, documentID, userID uuid.UUID) (sqlc.GeneratedDocument, error) {
-	s.logger.Info("Fetching generated document", "documentID", documentID, "userID", userID)
-	doc, err := s.store.GetGeneratedDocumentByID(ctx, pgtype.UUID{Bytes: documentID, Valid: true})
+// Helper to update document status
+func (s *ResearchService) updateDocStatus(ctx context.Context, docID uuid.UUID, status string, statusMessage string) {
+	// You'll need an UpdateGeneratedDocument query that can set status and a status_message field
+	s.logger.Info("Updating document status", "docID", docID, "status", status, "message", statusMessage)
+	_, err := s.store.UpdateGeneratedDocumentStatus(ctx, sqlc.UpdateGeneratedDocumentStatusParams{
+		ID:     pgtype.UUID{Bytes: docID, Valid: true},
+		Status: pgtype.Text{String: status, Valid: true},
+		// Add a status_message field to your generated_documents table and sqlc query
+	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
-			return sqlc.GeneratedDocument{}, ErrDocumentNotFound
-		}
-		return sqlc.GeneratedDocument{}, fmt.Errorf("db error fetching document: %w", err)
+		s.logger.Error("Failed to update document status in DB", "docID", docID, "error", err)
 	}
-	// Check ownership
-	_, projectErr := s.GetUserProjectByID(ctx, doc.ProjectID.Bytes, userID)
-	if projectErr != nil {
-		return sqlc.GeneratedDocument{}, ErrDocumentNotFound // Or Forbidden
-	}
-	return doc, nil
 }

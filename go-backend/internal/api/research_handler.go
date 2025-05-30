@@ -401,7 +401,7 @@ func (s *Server) generateDocumentHandler(c *gin.Context) {
 }
 
 func (s *Server) downloadDocumentHandler(c *gin.Context) {
-	authPayload := c.MustGet(authorizationPayloadKey).(*token.Payload)
+	_ = c.MustGet(authorizationPayloadKey).(*token.Payload)
 	projectIDStr := c.Param("project_id") // Not strictly needed if documentID is globally unique and has projectID
 	projectID, errP := uuid.Parse(projectIDStr)
 	_ = projectID // To avoid unused variable error
@@ -413,7 +413,7 @@ func (s *Server) downloadDocumentHandler(c *gin.Context) {
 		return
 	}
 
-	doc, err := s.researchService.GetGeneratedDocument(c.Request.Context(), documentID, authPayload.UserID)
+	doc, err := s.store.GetGeneratedDocumentByID(c.Request.Context(), pgtype.UUID{Bytes: documentID, Valid: true})
 	if err != nil {
 		if errors.Is(err, services.ErrDocumentNotFound) {
 			response.NotFound(c, services.ErrDocumentNotFound.Error())

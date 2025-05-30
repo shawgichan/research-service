@@ -36,6 +36,7 @@ type Querier interface {
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	GetUserResearchProjects(ctx context.Context, userID pgtype.UUID) ([]ResearchProject, error)
 	UpdateChapter(ctx context.Context, arg UpdateChapterParams) (Chapter, error)
+	UpdateGeneratedDocument(ctx context.Context, arg UpdateGeneratedDocumentParams) (GeneratedDocument, error)
 	UpdateGeneratedDocumentStatus(ctx context.Context, arg UpdateGeneratedDocumentStatusParams) (GeneratedDocument, error)
 	UpdateResearchProject(ctx context.Context, arg UpdateResearchProjectParams) (ResearchProject, error)
 	UpdateResearchProjectStatus(ctx context.Context, arg UpdateResearchProjectStatusParams) (ResearchProject, error)
