@@ -24,6 +24,7 @@ type Querier interface {
 	DeleteReference(ctx context.Context, arg DeleteReferenceParams) error
 	DeleteResearchProject(ctx context.Context, arg DeleteResearchProjectParams) error
 	DeleteSessionByRefreshToken(ctx context.Context, refreshToken string) error
+	GetChapterByID(ctx context.Context, id pgtype.UUID) (Chapter, error)
 	GetChapterByProjectIDAndType(ctx context.Context, arg GetChapterByProjectIDAndTypeParams) (Chapter, error)
 	GetChaptersByProjectID(ctx context.Context, projectID pgtype.UUID) ([]Chapter, error)
 	GetGeneratedDocumentByID(ctx context.Context, id pgtype.UUID) (GeneratedDocument, error)

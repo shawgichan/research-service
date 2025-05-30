@@ -58,6 +58,10 @@ INSERT INTO chapters (
     $1, $2, $3, $4, $5
 ) RETURNING *;
 
+-- name: GetChapterByID :one
+SELECT * FROM chapters
+WHERE id = $1 LIMIT 1;
+
 -- name: GetChaptersByProjectID :many
 SELECT * FROM chapters
 WHERE project_id = $1

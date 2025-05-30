@@ -1,11 +1,14 @@
 package api
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
 	"os" // For file download (example)
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shawgichan/research-service/internal/api/response"
 	apimodels "github.com/shawgichan/research-service/internal/models" // API request/response models
 	"github.com/shawgichan/research-service/internal/services"
@@ -260,26 +263,28 @@ func (s *Server) generateChapterContentHandler(c *gin.Context) {
 
 	// We need the chapter type. The client should send it, or we fetch the chapter to get its type.
 	// For this example, let's assume the client sends it in the request body.
-	var reqBody struct {
-		Type string `json:"type" binding:"required,oneof=introduction literature_review methodology"`
-	}
-	if err := c.ShouldBindJSON(&reqBody); err != nil {
-		s.logger.Warn("Invalid generate chapter content request: missing type", "chapterID", chapterID, "error", err)
-		response.BadRequest(c, "Chapter type is required in request body (introduction, literature_review, methodology)", err.Error())
+	chapterCheck, err := s.store.GetChapterByID(c.Request.Context(), pgtype.UUID{Bytes: chapterID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+			s.logger.Warn("Chapter not found in DB", "chapterID", chapterID)
+			response.NotFound(c, "Chapter not found")
+			return
+		}
+		s.logger.Error("Failed to get chapter from DB", "chapterID", chapterID, "error", err)
+		response.InternalServerError(c, "Failed to retrieve chapter", err)
 		return
 	}
-
-	chapter, err := s.researchService.GenerateChapterContent(c.Request.Context(), projectID, chapterID, authPayload.UserID, reqBody.Type)
+	chapter, err := s.researchService.GenerateChapterContent(c.Request.Context(), projectID, chapterID, authPayload.UserID, chapterCheck.Type)
 	if err != nil {
 		if errors.Is(err, services.ErrProjectNotFound) || errors.Is(err, services.ErrChapterNotFound) {
 			response.NotFound(c, "Chapter or project not found for content generation.")
 			return
 		}
-		s.logger.Error("Failed to generate chapter content", "chapterID", chapterID, "type", reqBody.Type, "error", err)
-		response.InternalServerError(c, fmt.Sprintf("Failed to generate content for %s", reqBody.Type), err)
+		s.logger.Error("Failed to generate chapter content", "chapterID", chapterID, "type", chapterCheck.Type, "error", err)
+		response.InternalServerError(c, fmt.Sprintf("Failed to generate content for %s", chapterCheck.Type), err)
 		return
 	}
-	response.Ok(c, apimodels.ToChapterResponse(chapter), fmt.Sprintf("%s content generated successfully", reqBody.Type))
+	response.Ok(c, apimodels.ToChapterResponse(chapter), fmt.Sprintf("%s content generated successfully", chapterCheck.Type))
 }
 
 // --- Reference Handlers ---
