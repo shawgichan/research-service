@@ -13,7 +13,8 @@ import (
 	"github.com/shawgichan/research-service/internal/models"           // For placeholder references
 )
 
-const openAIAPIURL = "https://api.openai.com/v1/chat/completions"
+// const openAIAPIURL = "https://api.openai.com/v1/chat/completions"
+const openAIAPIURL = "https://api.groq.com/openai/v1/chat/completions"
 
 type AIService struct {
 	apiKey string
@@ -157,7 +158,9 @@ Another, B. B. (Year). Title of article. Journal Title, volume(issue), pages.
 `, title, specialization)
 
 	request := OpenAIRequest{
-		Model: "gpt-4-turbo-preview", // Or "gpt-3.5-turbo" for faster/cheaper, "gpt-4" for higher quality
+		// Model: "gpt-4-turbo-preview", // Or "gpt-3.5-turbo" for faster/cheaper, "gpt-4" for higher quality
+		Model: "meta-llama/llama-4-scout-17b-16e-instruct",
+
 		Messages: []OpenAIMessage{
 			{Role: "system", Content: "You are an expert academic research assistant specializing in writing literature reviews."},
 			{Role: "user", Content: prompt},
@@ -202,7 +205,8 @@ Ensure academic tone and clarity.
 `, title, specialization, literatureReviewSummary)
 
 	request := OpenAIRequest{
-		Model: "gpt-4-turbo-preview",
+		// Model: "gpt-4-turbo-preview",
+		Model: "meta-llama/llama-4-scout-17b-16e-instruct",
 		Messages: []OpenAIMessage{
 			{Role: "system", Content: "You are an expert academic writer specializing in crafting thesis introductions."},
 			{Role: "user", Content: prompt},
@@ -243,7 +247,8 @@ Target length: 500-800 words of guidance and placeholders.
 `, title, specialization, researchType)
 
 	request := OpenAIRequest{
-		Model: "gpt-3.5-turbo", // Can use a less powerful model for templates
+		// Model: "gpt-3.5-turbo", // Can use a less powerful model for templates
+		Model: "meta-llama/llama-4-scout-17b-16e-instruct",
 		Messages: []OpenAIMessage{
 			{Role: "system", Content: "You are an expert in research methodologies, providing structured templates."},
 			{Role: "user", Content: prompt},

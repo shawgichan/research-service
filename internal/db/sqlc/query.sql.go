@@ -345,6 +345,28 @@ func (q *Queries) DeleteSessionByRefreshToken(ctx context.Context, refreshToken 
 	return err
 }
 
+const getChapterByID = `-- name: GetChapterByID :one
+SELECT id, project_id, type, title, content, word_count, status, created_at, updated_at FROM chapters
+WHERE id = $1 LIMIT 1
+`
+
+func (q *Queries) GetChapterByID(ctx context.Context, id pgtype.UUID) (Chapter, error) {
+	row := q.db.QueryRow(ctx, getChapterByID, id)
+	var i Chapter
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.Type,
+		&i.Title,
+		&i.Content,
+		&i.WordCount,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getChapterByProjectIDAndType = `-- name: GetChapterByProjectIDAndType :one
 SELECT id, project_id, type, title, content, word_count, status, created_at, updated_at FROM chapters
 WHERE project_id = $1 AND type = $2 LIMIT 1
