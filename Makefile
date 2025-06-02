@@ -8,13 +8,13 @@ createdb:
 	@docker exec -it db_research dropdb --if-exists -U ${POSTGRES_USER} research_db || true
 	@docker exec -it db_research createdb --username=${POSTGRES_USER} --owner=${POSTGRES_USER} research_db
 migrateup1:
-	migrate -path internal/db/migration -database "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/research_db?sslmode=disable" -verbose up 1
+	migrate -path go-backend/internal/db/migration -database "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/research_db?sslmode=disable" -verbose up 1
 migrateup:
-	migrate -path internal/db/migration -database "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/research_db?sslmode=disable" -verbose up
+	migrate -path go-backend/internal/db/migration -database "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/research_db?sslmode=disable" -verbose up
 migratedown:
-	migrate -path internal/db/migration -database "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/research_db?sslmode=disable" -verbose down
+	migrate -path go-backend/internal/db/migration -database "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/research_db?sslmode=disable" -verbose down
 migratedown1:
-	migrate -path internal/db/migration -database "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/research_db?sslmode=disable" -verbose down 1
+	migrate -path go-backend/internal/db/migration -database "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/research_db?sslmode=disable" -verbose down 1
 redis:
 	docker run --name redis -p 6379:6379 -d redis:7-alpine
 run:
