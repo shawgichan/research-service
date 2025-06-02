@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	applogger "github.com/shawgichan/research-service/go-backend/internal/logger" // aliased
@@ -28,6 +31,35 @@ func NewAIService(apiKey string, logger *applogger.AppLogger) *AIService {
 		client: &http.Client{Timeout: 60 * time.Second}, // Increased timeout for potentially long AI responses
 		logger: logger,
 	}
+}
+
+type Theme struct {
+	Name        string
+	Description string   // AI generated description of theme
+	PaperIDs    []string // IDs of papers relevant to this theme
+}
+
+type SemanticPaper struct {
+	PaperID string `json:"paperId"`
+	Title   string `json:"title"`
+	Authors []struct {
+		Name string `json:"name"`
+	} `json:"authors"`
+	Year             int                    `json:"year"`
+	Abstract         *string                `json:"abstract"` // Pointer as it can be null
+	DOI              *string                `json:"doi"`
+	Journal          *struct{ Name string } `json:"journal"`
+	PublicationTypes []string               `json:"publicationTypes"`
+	ExternalIds      map[string]string      `json:"externalIds"`
+	IsOpenAccess     bool                   `json:"isOpenAccess"`
+	OpenAccessPdf    *struct {
+		Url string `json:"url"`
+	} `json:"openAccessPdf"`
+}
+
+type semanticScholarResponse struct {
+	Data []SemanticPaper `json:"data"`
+	// Include total/next offset if pagination needed later
 }
 
 type OpenAIRequest struct {
@@ -298,6 +330,147 @@ func (s *AIService) extractPlaceholderReferences(content, specialization string)
 	}
 	s.logger.Info("Generated placeholder references", "count", len(refs))
 	return refs
+}
+
+func (s *AIService) SearchSemanticScholar(ctx context.Context, query string, specialization string, yearStart int) ([]SemanticPaper, error) {
+	const endpoint = "https://api.semanticscholar.org/graph/v1/paper/search"
+	fields := "paperId,title,authors,year,abstract,doi,journal,publicationTypes,externalIds,isOpenAccess,openAccessPdf"
+
+	// Combine query with specialization
+	fullQuery := fmt.Sprintf("%s %s", query, specialization)
+
+	// Build query params
+	params := url.Values{}
+	params.Set("query", fullQuery)
+	params.Set("fields", fields)
+	params.Set("limit", strconv.Itoa(10))
+	params.Set("offset", "0") // support offset-based pagination later
+
+	reqUrl := fmt.Sprintf("%s?%s", endpoint, params.Encode())
+
+	// Build request
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build request: %w", err)
+	}
+
+	// Optional: Set API key if you have one
+	if s.apiKey != "" {
+		req.Header.Set("x-api-key", s.apiKey)
+	}
+
+	// Make HTTP request
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP status
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Decode response
+	var result semanticScholarResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Optional: Filter by yearStart (if API doesn't support it)
+	filtered := make([]SemanticPaper, 0, len(result.Data))
+	for _, paper := range result.Data {
+		if paper.Year >= yearStart {
+			filtered = append(filtered, paper)
+		}
+	}
+
+	return filtered, nil
+}
+
+func buildAbstractsSection(papers []SemanticPaper) string {
+	var sb strings.Builder
+	for _, paper := range papers {
+		if paper.Abstract != nil {
+			fmt.Fprintf(&sb, "- Paper ID: %s\n  Title: %s\n  Abstract: %s\n\n", paper.PaperID, paper.Title, *paper.Abstract)
+		}
+	}
+	return sb.String()
+}
+
+func (s *AIService) IdentifyThemesFromAbstracts(ctx context.Context, thesisTitle string, papers []SemanticPaper) ([]Theme, error) {
+	prompt := fmt.Sprintf(`You are an academic assistant.
+
+Thesis title: "%s"
+
+Below are abstracts of related research papers. Identify 3–5 overarching themes. For each theme, provide:
+- A short name
+- A 2–3 sentence description
+- A list of paper IDs (from the abstracts) that belong to this theme
+
+Return the result in this exact JSON format:
+[
+  {
+    "Name": "Theme Name",
+    "Description": "Short explanation of the theme",
+    "PaperIDs": ["paperId1", "paperId2"]
+  }
+]
+
+Abstracts:
+%s
+`, thesisTitle, buildAbstractsSection(papers))
+
+	request := OpenAIRequest{
+		Model: "gpt-4",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: "You are a helpful academic assistant."},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0.7,
+	}
+
+	resp, err := s.callOpenAI(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+
+	raw := resp.Choices[0].Message.Content
+	var themes []Theme
+	if err := json.Unmarshal([]byte(raw), &themes); err != nil {
+		s.logger.Warn("Failed to parse JSON from LLM", "content", raw)
+		return nil, fmt.Errorf("failed to parse themes: %w", err)
+	}
+
+	return themes, nil
+}
+
+func (s *AIService) GenerateLiteratureReviewSection(ctx context.Context, thesisTitle, themeName string, relevantPapers []SemanticPaper, targetWordCount int) (string, error) {
+	prompt := fmt.Sprintf(`You are writing a literature review section for a thesis titled "%s".
+
+Theme: %s
+
+Using the following abstracts, write an academic literature review (~%d words) discussing how these papers contribute to this theme. Use your own words and cite papers in (Author, Year) format.
+
+Abstracts:
+%s
+`, thesisTitle, themeName, targetWordCount, buildAbstractsSection(relevantPapers))
+
+	request := OpenAIRequest{
+		Model: "gpt-4",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: "You are a skilled academic writer."},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0.7,
+	}
+
+	resp, err := s.callOpenAI(ctx, request)
+	if err != nil {
+		return "", err
+	}
+
+	return resp.Choices[0].Message.Content, nil
 }
 
 // Helper for models.Reference (since fields are pointers)

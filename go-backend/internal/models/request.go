@@ -47,8 +47,9 @@ type UpdateChapterRequest struct {
 }
 
 type GenerateChapterContentRequest struct {
-	ProjectID uuid.UUID `json:"project_id" binding:"required"`
-	ChapterID uuid.UUID `json:"chapter_id" binding:"required"` // Or Type if generating for first time and ID not known
+	ProjectID                uuid.UUID `json:"project_id" binding:"required"`
+	ChapterID                uuid.UUID `json:"chapter_id" binding:"required"`         // Or Type if generating for first time and ID not known
+	SelectedSemanticPaperIDs []string  `json:"selected_semantic_paper_ids,omitempty"` // For Literature Review
 	// Add any specific params for generation, e.g., keywords, specific focus
 }
 
@@ -67,4 +68,11 @@ type CreateReferenceRequest struct {
 type GenerateDocumentRequest struct {
 	ProjectID uuid.UUID `json:"project_id" binding:"required"`
 	// Add other options like template, citation style if needed
+}
+
+type SearchPapersRequest struct {
+	Query          string `json:"query" binding:"required"`          // Could be derived from project title or user input
+	Specialization string `json:"specialization" binding:"required"` // From project
+	YearStart      int    `json:"year_start,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
 }
