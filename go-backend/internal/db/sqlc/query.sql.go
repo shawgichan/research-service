@@ -113,22 +113,25 @@ func (q *Queries) CreateGeneratedDocument(ctx context.Context, arg CreateGenerat
 
 const createReference = `-- name: CreateReference :one
 INSERT INTO "references" ( -- Quoted
-    project_id, title, authors, journal, publication_year, doi, url, citation_apa, citation_mla
+    project_id, title, authors, journal, publication_year, doi, url, citation_apa, citation_mla, semantic_scholar_id, abstract, source_api
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9
-) RETURNING id, project_id, title, authors, journal, publication_year, doi, url, citation_apa, citation_mla, created_at
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+) RETURNING id, project_id, title, authors, journal, publication_year, url, citation_apa, citation_mla, created_at, doi, semantic_scholar_id, abstract, source_api
 `
 
 type CreateReferenceParams struct {
-	ProjectID       pgtype.UUID `db:"project_id" json:"project_id"`
-	Title           string      `db:"title" json:"title"`
-	Authors         pgtype.Text `db:"authors" json:"authors"`
-	Journal         pgtype.Text `db:"journal" json:"journal"`
-	PublicationYear pgtype.Int4 `db:"publication_year" json:"publication_year"`
-	Doi             pgtype.Text `db:"doi" json:"doi"`
-	Url             pgtype.Text `db:"url" json:"url"`
-	CitationApa     pgtype.Text `db:"citation_apa" json:"citation_apa"`
-	CitationMla     pgtype.Text `db:"citation_mla" json:"citation_mla"`
+	ProjectID         pgtype.UUID `db:"project_id" json:"project_id"`
+	Title             string      `db:"title" json:"title"`
+	Authors           pgtype.Text `db:"authors" json:"authors"`
+	Journal           pgtype.Text `db:"journal" json:"journal"`
+	PublicationYear   pgtype.Int4 `db:"publication_year" json:"publication_year"`
+	Doi               pgtype.Text `db:"doi" json:"doi"`
+	Url               pgtype.Text `db:"url" json:"url"`
+	CitationApa       pgtype.Text `db:"citation_apa" json:"citation_apa"`
+	CitationMla       pgtype.Text `db:"citation_mla" json:"citation_mla"`
+	SemanticScholarID pgtype.Text `db:"semantic_scholar_id" json:"semantic_scholar_id"`
+	Abstract          pgtype.Text `db:"abstract" json:"abstract"`
+	SourceApi         pgtype.Text `db:"source_api" json:"source_api"`
 }
 
 func (q *Queries) CreateReference(ctx context.Context, arg CreateReferenceParams) (Reference, error) {
@@ -142,6 +145,9 @@ func (q *Queries) CreateReference(ctx context.Context, arg CreateReferenceParams
 		arg.Url,
 		arg.CitationApa,
 		arg.CitationMla,
+		arg.SemanticScholarID,
+		arg.Abstract,
+		arg.SourceApi,
 	)
 	var i Reference
 	err := row.Scan(
@@ -151,11 +157,14 @@ func (q *Queries) CreateReference(ctx context.Context, arg CreateReferenceParams
 		&i.Authors,
 		&i.Journal,
 		&i.PublicationYear,
-		&i.Doi,
 		&i.Url,
 		&i.CitationApa,
 		&i.CitationMla,
 		&i.CreatedAt,
+		&i.Doi,
+		&i.SemanticScholarID,
+		&i.Abstract,
+		&i.SourceApi,
 	)
 	return i, err
 }
@@ -494,8 +503,40 @@ func (q *Queries) GetGeneratedDocumentsByProjectID(ctx context.Context, projectI
 	return items, nil
 }
 
+const getReferenceByDOIAndProject = `-- name: GetReferenceByDOIAndProject :one
+SELECT id, project_id, title, authors, journal, publication_year, url, citation_apa, citation_mla, created_at, doi, semantic_scholar_id, abstract, source_api FROM "references"
+WHERE project_id = $1 AND doi = $2 LIMIT 1
+`
+
+type GetReferenceByDOIAndProjectParams struct {
+	ProjectID pgtype.UUID `db:"project_id" json:"project_id"`
+	Doi       pgtype.Text `db:"doi" json:"doi"`
+}
+
+func (q *Queries) GetReferenceByDOIAndProject(ctx context.Context, arg GetReferenceByDOIAndProjectParams) (Reference, error) {
+	row := q.db.QueryRow(ctx, getReferenceByDOIAndProject, arg.ProjectID, arg.Doi)
+	var i Reference
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.Title,
+		&i.Authors,
+		&i.Journal,
+		&i.PublicationYear,
+		&i.Url,
+		&i.CitationApa,
+		&i.CitationMla,
+		&i.CreatedAt,
+		&i.Doi,
+		&i.SemanticScholarID,
+		&i.Abstract,
+		&i.SourceApi,
+	)
+	return i, err
+}
+
 const getReferencesByProjectID = `-- name: GetReferencesByProjectID :many
-SELECT id, project_id, title, authors, journal, publication_year, doi, url, citation_apa, citation_mla, created_at FROM "references" -- Quoted
+SELECT id, project_id, title, authors, journal, publication_year, url, citation_apa, citation_mla, created_at, doi, semantic_scholar_id, abstract, source_api FROM "references" -- Quoted
 WHERE project_id = $1
 ORDER BY created_at DESC
 `
@@ -516,11 +557,14 @@ func (q *Queries) GetReferencesByProjectID(ctx context.Context, projectID pgtype
 			&i.Authors,
 			&i.Journal,
 			&i.PublicationYear,
-			&i.Doi,
 			&i.Url,
 			&i.CitationApa,
 			&i.CitationMla,
 			&i.CreatedAt,
+			&i.Doi,
+			&i.SemanticScholarID,
+			&i.Abstract,
+			&i.SourceApi,
 		); err != nil {
 			return nil, err
 		}

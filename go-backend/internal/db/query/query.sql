@@ -92,10 +92,14 @@ WHERE chapters.id = $1 AND project_id = (SELECT project_id FROM research_project
 
 -- name: CreateReference :one
 INSERT INTO "references" ( -- Quoted
-    project_id, title, authors, journal, publication_year, doi, url, citation_apa, citation_mla
+    project_id, title, authors, journal, publication_year, doi, url, citation_apa, citation_mla, semantic_scholar_id, abstract, source_api
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 ) RETURNING *;
+
+-- name: GetReferenceByDOIAndProject :one
+SELECT * FROM "references"
+WHERE project_id = $1 AND doi = $2 LIMIT 1;
 
 -- name: GetReferencesByProjectID :many
 SELECT * FROM "references" -- Quoted

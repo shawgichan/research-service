@@ -32,17 +32,20 @@ type GeneratedDocument struct {
 }
 
 type Reference struct {
-	ID              pgtype.UUID        `db:"id" json:"id"`
-	ProjectID       pgtype.UUID        `db:"project_id" json:"project_id"`
-	Title           string             `db:"title" json:"title"`
-	Authors         pgtype.Text        `db:"authors" json:"authors"`
-	Journal         pgtype.Text        `db:"journal" json:"journal"`
-	PublicationYear pgtype.Int4        `db:"publication_year" json:"publication_year"`
-	Doi             pgtype.Text        `db:"doi" json:"doi"`
-	Url             pgtype.Text        `db:"url" json:"url"`
-	CitationApa     pgtype.Text        `db:"citation_apa" json:"citation_apa"`
-	CitationMla     pgtype.Text        `db:"citation_mla" json:"citation_mla"`
-	CreatedAt       pgtype.Timestamptz `db:"created_at" json:"created_at"`
+	ID                pgtype.UUID        `db:"id" json:"id"`
+	ProjectID         pgtype.UUID        `db:"project_id" json:"project_id"`
+	Title             string             `db:"title" json:"title"`
+	Authors           pgtype.Text        `db:"authors" json:"authors"`
+	Journal           pgtype.Text        `db:"journal" json:"journal"`
+	PublicationYear   pgtype.Int4        `db:"publication_year" json:"publication_year"`
+	Url               pgtype.Text        `db:"url" json:"url"`
+	CitationApa       pgtype.Text        `db:"citation_apa" json:"citation_apa"`
+	CitationMla       pgtype.Text        `db:"citation_mla" json:"citation_mla"`
+	CreatedAt         pgtype.Timestamptz `db:"created_at" json:"created_at"`
+	Doi               pgtype.Text        `db:"doi" json:"doi"`
+	SemanticScholarID pgtype.Text        `db:"semantic_scholar_id" json:"semantic_scholar_id"`
+	Abstract          pgtype.Text        `db:"abstract" json:"abstract"`
+	SourceApi         pgtype.Text        `db:"source_api" json:"source_api"`
 }
 
 type ResearchProject struct {
