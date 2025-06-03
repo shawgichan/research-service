@@ -149,6 +149,17 @@ func ToGeneratedDocumentResponse(doc sqlc.GeneratedDocument) GeneratedDocumentRe
 	}
 }
 
+type SemanticPaperResponse struct {
+	PaperID       string   `json:"paper_id"`
+	Title         string   `json:"title"`
+	Authors       []string `json:"authors"`
+	Year          int      `json:"year"`
+	Abstract      string   `json:"abstract,omitempty"`
+	DOI           string   `json:"doi,omitempty"`
+	Journal       string   `json:"journal,omitempty"`
+	OpenAccessPDF *string  `json:"open_access_pdf,omitempty"` // URL to PDF if available
+}
+
 type ErrorResponse struct {
 	Error string `json:"error"`
 }

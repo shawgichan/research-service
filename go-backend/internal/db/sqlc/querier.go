@@ -29,6 +29,7 @@ type Querier interface {
 	GetChaptersByProjectID(ctx context.Context, projectID pgtype.UUID) ([]Chapter, error)
 	GetGeneratedDocumentByID(ctx context.Context, id pgtype.UUID) (GeneratedDocument, error)
 	GetGeneratedDocumentsByProjectID(ctx context.Context, projectID pgtype.UUID) ([]GeneratedDocument, error)
+	GetReferenceByDOIAndProject(ctx context.Context, arg GetReferenceByDOIAndProjectParams) (Reference, error)
 	GetReferencesByProjectID(ctx context.Context, projectID pgtype.UUID) ([]Reference, error)
 	GetResearchProjectByID(ctx context.Context, arg GetResearchProjectByIDParams) (ResearchProject, error)
 	GetSessionByRefreshToken(ctx context.Context, refreshToken string) (Session, error)

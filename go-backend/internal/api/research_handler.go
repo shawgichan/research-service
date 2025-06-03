@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"os" // For file download (example)
+	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -248,6 +250,73 @@ func (s *Server) updateChapter(c *gin.Context) {
 	response.Ok(c, apimodels.ToChapterResponse(updatedChapter), "Chapter updated successfully")
 }
 
+// New Handler for Paper Search:
+func (s *Server) searchPapersHandler(c *gin.Context) {
+	authPayload := c.MustGet(authorizationPayloadKey).(*token.Payload) // Assuming auth is required
+
+	projectIDStr := c.Param("project_id") // Assuming project_id is part of the route for context
+	projectID, err := uuid.Parse(projectIDStr)
+	if err != nil {
+		s.logger.Warn("Invalid project ID format in searchPapersHandler", "projectID", projectIDStr, "error", err)
+		response.BadRequest(c, "Invalid project ID format")
+		return
+	}
+
+	// You could get query, specialization, etc., from query parameters or a request body.
+	// For simplicity, let's use query parameters here.
+	searchQuery := c.Query("q")
+	specialization := c.Query("spec") // Or fetch from project details using projectID
+	yearStartStr := c.Query("year_start")
+	limitStr := c.Query("limit")
+
+	if searchQuery == "" {
+		response.BadRequest(c, "Search query 'q' is required")
+		return
+	}
+	if specialization == "" {
+		// Attempt to fetch from project if not provided
+		proj, projErr := s.researchService.GetUserProjectByID(c.Request.Context(), projectID, authPayload.UserID)
+		if projErr != nil {
+			s.logger.Warn("Could not fetch project for specialization in search", "projectID", projectID, "error", projErr)
+			response.BadRequest(c, "Specialization 'spec' is required or project not found")
+			return
+		}
+		specialization = proj.Specialization
+	}
+
+	var yearStart int
+	if yearStartStr != "" {
+		yearStart, err = strconv.Atoi(yearStartStr)
+		if err != nil {
+			response.BadRequest(c, "Invalid year_start format")
+			return
+		}
+	} else {
+		yearStart = time.Now().Year() - 5 // Default
+	}
+
+	var limit int
+	if limitStr != "" {
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil {
+			response.BadRequest(c, "Invalid limit format")
+			return
+		}
+	} else {
+		limit = 20 // Default
+	}
+
+	papers, err := s.researchService.SearchPapers(c.Request.Context(), authPayload.UserID, projectID, searchQuery, specialization, yearStart, limit)
+	if err != nil {
+		s.logger.Error("Failed to search papers in handler", "query", searchQuery, "error", err)
+		response.InternalServerError(c, "Failed to search papers", err)
+		return
+	}
+
+	response.Ok(c, papers)
+}
+
+// Modified generateChapterContentHandler:
 func (s *Server) generateChapterContentHandler(c *gin.Context) {
 	authPayload := c.MustGet(authorizationPayloadKey).(*token.Payload)
 	projectIDStr := c.Param("project_id")
@@ -261,30 +330,57 @@ func (s *Server) generateChapterContentHandler(c *gin.Context) {
 		return
 	}
 
-	// We need the chapter type. The client should send it, or we fetch the chapter to get its type.
-	// For this example, let's assume the client sends it in the request body.
-	chapterCheck, err := s.store.GetChapterByID(c.Request.Context(), pgtype.UUID{Bytes: chapterID, Valid: true})
+	// Fetch chapter to get its type
+	// Note: The researchService.GenerateChapterContent also fetches the chapter.
+	// We might optimize this, but for clarity, fetching type here is fine.
+	dbChapter, err := s.store.GetChapterByID(c.Request.Context(), pgtype.UUID{Bytes: chapterID, Valid: true})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
-			s.logger.Warn("Chapter not found in DB", "chapterID", chapterID)
+			s.logger.Warn("Chapter not found in DB for content generation", "chapterID", chapterID)
 			response.NotFound(c, "Chapter not found")
 			return
 		}
-		s.logger.Error("Failed to get chapter from DB", "chapterID", chapterID, "error", err)
-		response.InternalServerError(c, "Failed to retrieve chapter", err)
+		s.logger.Error("Failed to get chapter from DB for content generation", "chapterID", chapterID, "error", err)
+		response.InternalServerError(c, "Failed to retrieve chapter details", err)
 		return
 	}
-	chapter, err := s.researchService.GenerateChapterContent(c.Request.Context(), projectID, chapterID, authPayload.UserID, chapterCheck.Type)
-	if err != nil {
-		if errors.Is(err, services.ErrProjectNotFound) || errors.Is(err, services.ErrChapterNotFound) {
-			response.NotFound(c, "Chapter or project not found for content generation.")
+	chapterType := dbChapter.Type
+
+	// For literature review, we expect selected paper IDs in the request body
+	var req apimodels.GenerateChapterContentRequest // The Modified request model
+	if chapterType == "literature_review" {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			s.logger.Warn("Invalid request payload for literature review generation", "error", err)
+			response.BadRequest(c, "Invalid request payload: 'selected_semantic_paper_ids' expected for literature review.", err.Error())
 			return
 		}
-		s.logger.Error("Failed to generate chapter content", "chapterID", chapterID, "type", chapterCheck.Type, "error", err)
-		response.InternalServerError(c, fmt.Sprintf("Failed to generate content for %s", chapterCheck.Type), err)
+		if len(req.SelectedSemanticPaperIDs) == 0 {
+			response.BadRequest(c, "For literature review, 'selected_semantic_paper_ids' must not be empty.")
+			return
+		}
+	}
+	// For other chapter types, req.SelectedSemanticPaperIDs will be nil/empty, which is fine for them.
+
+	// Call the research service (pass selected IDs if applicable)
+	generatedChapter, err := s.researchService.GenerateChapterContent(
+		c.Request.Context(),
+		projectID,
+		chapterID,
+		authPayload.UserID,
+		chapterType,
+		req.SelectedSemanticPaperIDs, // This will be nil/empty if not literature_review type or not provided
+	)
+	if err != nil {
+		// Specific error handling based on service errors
+		if errors.Is(err, services.ErrProjectNotFound) || errors.Is(err, services.ErrChapterNotFound) {
+			response.NotFound(c, err.Error())
+			return
+		}
+		s.logger.Error("Failed to generate chapter content via service", "chapterID", chapterID, "type", chapterType, "error", err)
+		response.InternalServerError(c, fmt.Sprintf("Failed to generate content for %s", chapterType), err)
 		return
 	}
-	response.Ok(c, apimodels.ToChapterResponse(chapter), fmt.Sprintf("%s content generated successfully", chapterCheck.Type))
+	response.Ok(c, apimodels.ToChapterResponse(generatedChapter), fmt.Sprintf("%s content generated successfully", chapterType))
 }
 
 // --- Reference Handlers ---

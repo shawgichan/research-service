@@ -48,7 +48,6 @@ CREATE TABLE "references" ( -- Quoted because "references" can be a reserved key
     authors TEXT,
     journal VARCHAR(300),
     publication_year INTEGER,
-    doi VARCHAR(100),
     url TEXT,
     citation_apa TEXT,
     citation_mla TEXT,

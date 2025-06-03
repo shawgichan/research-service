@@ -348,124 +348,272 @@ func (s *ResearchService) UpdateChapter(ctx context.Context, chapterID, projectI
 
 // --- AI Content Generation for Chapters ---
 
-func (s *ResearchService) GenerateChapterContent(ctx context.Context, projectID, chapterID, userID uuid.UUID, chapterType string) (sqlc.Chapter, error) {
+// Refactoring GenerateChapterContent
+func (s *ResearchService) GenerateChapterContent(
+	ctx context.Context,
+	projectID uuid.UUID,
+	chapterID uuid.UUID,
+	userID uuid.UUID,
+	chapterType string,
+	// Pass the selected paper IDs from the request if it's a lit review
+	selectedSemanticPaperIDs []string,
+) (sqlc.Chapter, error) {
 	s.logger.Info("Generating content for chapter", "chapterID", chapterID, "projectID", projectID, "type", chapterType, "userID", userID)
 	project, err := s.GetUserProjectByID(ctx, projectID, userID)
 	if err != nil {
 		return sqlc.Chapter{}, err // Project not found or access denied
 	}
 
-	// Find the chapter
-	chapters, err := s.store.GetChaptersByProjectID(ctx, pgtype.UUID{Bytes: projectID, Valid: true})
+	// Find the chapter (ensure it belongs to the project and user implicitly via project check)
+	// You might want a more direct GetChapterByIDAndProjectID query here in the future.
+	chapterToUpdate, err := s.store.GetChapterByID(ctx, pgtype.UUID{Bytes: chapterID, Valid: true})
 	if err != nil {
-		return sqlc.Chapter{}, fmt.Errorf("could not fetch chapters: %w", err)
-	}
-	var targetChapter sqlc.Chapter
-	found := false
-	for _, ch := range chapters {
-		if ch.ID.Bytes == chapterID && ch.Type == chapterType {
-			targetChapter = ch
-			found = true
-			break
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+			s.logger.Warn("Chapter not found for content generation", "chapterID", chapterID)
+			return sqlc.Chapter{}, ErrChapterNotFound
 		}
+		s.logger.Error("Failed to get chapter for content generation", "chapterID", chapterID, "error", err)
+		return sqlc.Chapter{}, fmt.Errorf("could not retrieve chapter: %w", err)
 	}
-	_ = targetChapter // for now, we're not using this
-	if !found {
-		s.logger.Warn("Chapter not found for content generation", "chapterID", chapterID, "projectID", projectID, "type", chapterType)
-		return sqlc.Chapter{}, ErrChapterNotFound
+
+	// Verify chapter belongs to the project
+	if chapterToUpdate.ProjectID.Bytes != projectID {
+		s.logger.Warn("Chapter does not belong to the specified project", "chapterID", chapterID, "projectID", projectID)
+		return sqlc.Chapter{}, ErrChapterNotFound // Or a more specific error
+	}
+	// Ensure chapter type matches (already passed as chapterType, but good to double check from DB if needed)
+	if chapterToUpdate.Type != chapterType {
+		s.logger.Warn("Mismatched chapter type for generation", "requestedType", chapterType, "dbType", chapterToUpdate.Type)
+		return sqlc.Chapter{}, fmt.Errorf("mismatched chapter type for generation")
 	}
 
 	var generatedContent string
-	var generatedReferences []*apimodels.ReferenceResponse // For lit review
+	// var generatedReferences []*apimodels.ReferenceResponse // This was for placeholder, now we use SemanticPaper
 
 	switch chapterType {
 	case "literature_review":
-		generatedContent, generatedReferences, err = s.aiService.GenerateLiteratureReview(ctx, project.Title, project.Specialization)
-		if err == nil && len(generatedReferences) > 0 {
-			// Save these references to the DB
-			for _, refData := range generatedReferences {
-				// Check if refData fields are nil before dereferencing
-				var authors, journal, doi, url, citationAPA, citationMLA pgtype.Text
-				var pubYear pgtype.Int4
+		if len(selectedSemanticPaperIDs) == 0 {
+			s.logger.Warn("No semantic paper IDs provided for literature review generation", "chapterID", chapterID)
+			return sqlc.Chapter{}, errors.New("at least one paper must be selected for literature review generation")
+		}
 
-				if refData.Authors != "" {
-					authors = pgtype.Text{String: refData.Authors, Valid: true}
-				}
-				if refData.Journal != "" {
-					journal = pgtype.Text{String: refData.Journal, Valid: true}
-				}
-				if refData.DOI != "" {
-					doi = pgtype.Text{String: refData.DOI, Valid: true}
-				}
-				if refData.URL != "" {
-					url = pgtype.Text{String: refData.URL, Valid: true}
-				}
-				if refData.CitationAPA != "" {
-					citationAPA = pgtype.Text{String: refData.CitationAPA, Valid: true}
-				}
-				if refData.CitationMLA != "" {
-					citationMLA = pgtype.Text{String: refData.CitationMLA, Valid: true}
-				}
-				if refData.PublicationYear != 0 {
-					pubYear = pgtype.Int4{Int32: int32(refData.PublicationYear), Valid: true}
-				}
+		// Fetch full details of selected Semantic Scholar papers
+		// This assumes selectedSemanticPaperIDs are IDs that aiService.SearchSemanticScholar can use
+		// or that we have a way to fetch details by ID.
+		// For simplicity now, let's assume the frontend sends enough info for SemanticPaper objects,
+		// or this function fetches them.
+		// A more robust way: Store SemanticPaper results from search temporarily (e.g., Redis cache keyed by user/project)
+		// then retrieve the selected ones.
+		// For now, let's simulate fetching/constructing SemanticPaper objects based on IDs.
+		// This part needs careful implementation of how `selectedPapers` are obtained.
+		// We'll assume `aiService.SearchSemanticScholar` is flexible or we have another method.
+		// A better approach: the frontend does the search, displays results, user selects,
+		// and then for generation, frontend sends the *full SemanticPaper objects* (or enough data to reconstruct them)
+		// that were selected, not just IDs. Or, backend caches results of search and retrieves by ID.
 
-				_, refErr := s.store.CreateReference(ctx, sqlc.CreateReferenceParams{
-					ProjectID:       pgtype.UUID{Bytes: projectID, Valid: true},
-					Title:           refData.Title, // Assuming Title is not nil
-					Authors:         authors,
-					Journal:         journal,
-					PublicationYear: pubYear,
-					Doi:             doi,
-					Url:             url,
-					CitationApa:     citationAPA,
-					CitationMla:     citationMLA,
-				})
-				if refErr != nil {
-					s.logger.Error("Failed to save generated reference", "projectID", projectID, "error", refErr)
-					// Continue, but log the error
+		// Let's assume for now, for simplicity, that we re-fetch these papers based on their IDs if needed,
+		// or that SearchSemanticScholar can take a list of IDs to fetch.
+		// However, Semantic Scholar's search API is query-based, not ID-list based for fetching.
+		// So, a better flow:
+		// 1. User searches via frontend -> calls /search-papers endpoint in Go -> Go calls Semantic Scholar.
+		// 2. Frontend displays results (List of SemanticPaperResponse).
+		// 3. User selects papers. Frontend sends *list of selected SemanticPaperResponse objects* (or just their IDs if backend caches).
+		// 4. Go backend transforms these back to `SemanticPaper` to pass to `aiService.GenerateLiteratureReview`.
+
+		// *** Temporary/Simplified: Assume `selectedSemanticPaperIDs` map to a cached list or we re-search with a very specific query. ***
+		// *** This is a placeholder for how `actualSelectedPapers` is populated. You'll need to refine this. ***
+		var actualSelectedPapers []SemanticPaper
+		// If you cached previous search results:
+		// actualSelectedPapers = s.getCachedPapers(ctx, projectID, selectedSemanticPaperIDs)
+		// Or, if the frontend sent the full selected paper details (preferred for this step):
+		// The request model for GenerateChapterContentRequest would need to be updated to accept []SemanticPaper or similar.
+		// For now, we'll just log a warning that this part needs to be robust.
+		s.logger.Warn("Populating 'actualSelectedPapers' needs a robust implementation (e.g., from cached search results or frontend providing full selected paper data).")
+		// For the demo, let's assume if selectedSemanticPaperIDs is not empty, we proceed with a dummy list if needed.
+		// THIS IS A CRITICAL POINT TO IMPLEMENT CORRECTLY.
+		// For now, let's just proceed assuming selectedSemanticPaperIDs can be used to get SemanticPaper objects.
+		// If frontend sends full paper data:
+		// `req.SelectedPapersData` would be part of `GenerateChapterContentRequest`
+		// for _, paperData := range req.SelectedPapersData { actualSelectedPapers = append(actualSelectedPapers, paperData.ToAIServiceModel()) }
+
+		// Let's simulate that 'selectedSemanticPaperIDs' are enough to identify papers for now.
+		// We need a way to get `SemanticPaper` structs for these IDs.
+		// This requires the frontend to send back the full `SemanticPaper` data for selected items.
+		// For the purpose of this example, let's assume `selectedSemanticPaperIDs` can be used by AIService.
+		// A more realistic approach if you only have IDs: fetch each paper by ID from Semantic Scholar.
+		// The S2 API for paper details is like: https://api.semanticscholar.org/graph/v1/paper/{paper_id}?fields=...
+		// This would mean `AIService.GenerateLiteratureReview` needs to take IDs and fetch details.
+		// Or, the `ResearchService` fetches details for each ID and then passes `[]SemanticPaper` to `AIService`.
+
+		// Let's adjust GenerateLiteratureReview to take IDs and fetch paper details.
+		// This change needs to propagate to AIService.GenerateLiteratureReview as well.
+		// For now, to keep current structure, let's assume the request sends full paper data.
+		// So, `GenerateChapterContentRequest` should have `SelectedPapers []apimodels.SemanticPaperResponse`
+		// Then in `GenerateChapterContent`:
+		// var papersForAI []SemanticPaper
+		// for _, pResp := range req.SelectedPapers { // req would be the parsed JSON body
+		//     papersForAI = append(papersForAI, pResp.ToAIServiceModel()) // you'd need a ToAIServiceModel
+		// }
+		// For now, we'll pass an empty list, highlighting this dependency.
+		// actualSelectedPapers = []SemanticPaper{} // Placeholder!
+
+		if len(actualSelectedPapers) == 0 && len(selectedSemanticPaperIDs) > 0 {
+			s.logger.Warn("No 'actualSelectedPapers' were populated. This indicates a missing step where selected paper details are retrieved or passed from the frontend.")
+			// Attempt to fetch by ID as a fallback for this example (this is inefficient if many IDs)
+			for _, paperID := range selectedSemanticPaperIDs {
+				// Simulate fetching. In reality, you'd call Semantic Scholar paper details endpoint
+				// This is very simplified:
+				tempPaper, errFetch := s.aiService.GetSemanticPaperDetails(ctx, paperID) // You'd need to implement GetSemanticPaperDetails
+				if errFetch == nil {
+					actualSelectedPapers = append(actualSelectedPapers, tempPaper)
+				} else {
+					s.logger.Error("Could not fetch details for paper ID (simulated)", "paperID", paperID, "error", errFetch)
 				}
 			}
 		}
+		if len(actualSelectedPapers) == 0 {
+			return sqlc.Chapter{}, errors.New("failed to retrieve details for selected papers")
+		}
+
+		var usedPapers []SemanticPaper
+		generatedContent, usedPapers, err = s.aiService.GenerateLiteratureReview(ctx, project.Title, project.Specialization, actualSelectedPapers, 500) // 500 words per section approx
+		if err != nil {
+			s.logger.Error("AI literature review generation failed", "chapterID", chapterID, "error", err)
+			return sqlc.Chapter{}, fmt.Errorf("AI literature review generation failed: %w", err)
+		}
+
+		// Save usedPapers as references
+		for _, paper := range usedPapers {
+			// Check for duplicates first
+			var existingRef sqlc.Reference
+			var getErr error
+			if paper.DOI != nil && *paper.DOI != "" {
+				existingRef, getErr = s.store.GetReferenceByDOIAndProject(ctx, sqlc.GetReferenceByDOIAndProjectParams{
+					ProjectID: project.ID,
+					Doi:       pgtype.Text{String: *paper.DOI, Valid: true},
+				})
+			} // Add similar check for SemanticScholarID if you have a query for it.
+
+			if getErr == nil && existingRef.ID.Valid { // Found existing
+				s.logger.Info("Reference already exists, skipping creation", "doi", *paper.DOI, "projectID", project.ID)
+				continue
+			} else if getErr != nil && !errors.Is(getErr, pgx.ErrNoRows) && !errors.Is(getErr, sql.ErrNoRows) {
+				s.logger.Error("Error checking for existing reference", "projectID", project.ID, "error", getErr)
+				// Continue, try to add anyway or handle error
+			}
+
+			var authorsText []string
+			for _, author := range paper.Authors {
+				authorsText = append(authorsText, author.Name)
+			}
+			var journalName string
+			if paper.Journal != nil {
+				journalName = paper.Journal.Name
+			}
+			var abstractText string
+			if paper.Abstract != nil {
+				abstractText = *paper.Abstract
+			}
+			var doiText string
+			if paper.DOI != nil {
+				doiText = *paper.DOI
+			}
+
+			createRefParams := sqlc.CreateReferenceParams{
+				ProjectID:         project.ID,
+				Title:             paper.Title,
+				Authors:           pgtype.Text{String: strings.Join(authorsText, "; "), Valid: len(authorsText) > 0},
+				Journal:           pgtype.Text{String: journalName, Valid: journalName != ""},
+				PublicationYear:   pgtype.Int4{Int32: int32(paper.Year), Valid: paper.Year != 0},
+				Doi:               pgtype.Text{String: doiText, Valid: doiText != ""},
+				SemanticScholarID: pgtype.Text{String: paper.PaperID, Valid: paper.PaperID != ""},
+				Abstract:          pgtype.Text{String: abstractText, Valid: abstractText != ""},
+				SourceApi:         pgtype.Text{String: "semantic_scholar", Valid: true},
+				// CitationAPA/MLA can be generated later or by AI if needed
+			}
+			_, refErr := s.store.CreateReference(ctx, createRefParams)
+			if refErr != nil {
+				// Handle potential unique constraint violation if duplicate check wasn't perfect
+				if strings.Contains(refErr.Error(), "unique constraint") {
+					s.logger.Warn("Failed to save generated reference due to unique constraint (likely duplicate)", "projectID", projectID, "title", paper.Title, "error", refErr)
+				} else {
+					s.logger.Error("Failed to save generated reference", "projectID", projectID, "title", paper.Title, "error", refErr)
+				}
+				// Continue, but log the error
+			}
+		}
+
 	case "introduction":
-		// For introduction, we might need summary of lit review.
 		// Fetch lit review chapter content if available
-		litReviewContent := "No literature review summary available."
-		litReviewChapter, lrErr := s.store.GetChapterByProjectIDAndType(ctx, sqlc.GetChapterByProjectIDAndTypeParams{ProjectID: pgtype.UUID{Bytes: projectID, Valid: true}, Type: "literature_review"})
+		litReviewChapter, lrErr := s.store.GetChapterByProjectIDAndType(ctx, sqlc.GetChapterByProjectIDAndTypeParams{
+			ProjectID: project.ID,
+			Type:      "literature_review",
+		})
+
+		litReviewSummary := "Literature review is pending or not yet summarized."
 		if lrErr == nil && litReviewChapter.Content.Valid {
 			// Create a summary of litReviewChapter.Content (can be another AI call or simple truncation)
-			summaryLimit := 500 // characters
-			if len(litReviewChapter.Content.String) > summaryLimit {
-				litReviewContent = litReviewChapter.Content.String[:summaryLimit] + "..."
+			summaryLimit := 1000 // characters for summary to pass to intro prompt
+			contentStr := litReviewChapter.Content.String
+			if utf8.RuneCountInString(contentStr) > summaryLimit {
+				// Find a good place to cut (e.g., end of sentence)
+				summaryRunes := []rune(contentStr)
+				cutPoint := summaryLimit
+				for i := summaryLimit; i > 0; i-- {
+					if summaryRunes[i] == '.' || summaryRunes[i] == '?' || summaryRunes[i] == '!' {
+						cutPoint = i + 1
+						break
+					}
+				}
+				litReviewSummary = string(summaryRunes[:cutPoint]) + "..."
 			} else {
-				litReviewContent = litReviewChapter.Content.String
+				litReviewSummary = contentStr
+			}
+		} else {
+			s.logger.Warn("Could not retrieve literature review for introduction context", "projectID", project.ID, "error", lrErr)
+		}
+
+		// Fetch themes (this is tricky - themes aren't stored directly yet)
+		// Option 1: Re-run IdentifyThemesFromAbstracts if you have the papers for the lit review
+		// Option 2: Store themes alongside the lit review chapter (e.g., in a JSONB column or related table)
+		// For now, let's pass an empty list of themes, highlighting this as an area for improvement.
+		var keyThemesForIntro []Theme // Placeholder
+		s.logger.Warn("Fetching key themes for introduction context is not fully implemented. Passing empty themes.", "projectID", project.ID)
+
+		generatedContent, err = s.aiService.GenerateIntroduction(ctx, project.Title, project.Specialization, litReviewSummary, keyThemesForIntro)
+		if err != nil {
+			s.logger.Error("AI introduction generation failed", "chapterID", chapterID, "error", err)
+			return sqlc.Chapter{}, fmt.Errorf("AI introduction generation failed: %w", err)
+		}
+
+	case "methodology":
+		// For now, keep existing simple template generation. Phase 2 will enhance this.
+		researchType := "general academic research" // Placeholder
+		if project.Description.Valid {
+			descLower := strings.ToLower(project.Description.String)
+			if strings.Contains(descLower, "qualitative") {
+				researchType = "Qualitative Research"
+			}
+			if strings.Contains(descLower, "quantitative") {
+				researchType = "Quantitative Research"
 			}
 		}
-		generatedContent, err = s.aiService.GenerateIntroduction(ctx, project.Title, project.Specialization, litReviewContent)
-	case "methodology":
-		// For methodology, we might need research type (e.g. from project description or a dedicated field)
-		researchType := "general academic research" // Placeholder, extract from project if possible
-		if project.Description.Valid && strings.Contains(strings.ToLower(project.Description.String), "qualitative") {
-			researchType = "Qualitative Research"
-		} else if project.Description.Valid && strings.Contains(strings.ToLower(project.Description.String), "quantitative") {
-			researchType = "Quantitative Research"
-		}
 		generatedContent, err = s.aiService.GenerateMethodologyTemplate(ctx, project.Title, project.Specialization, researchType)
+		if err != nil {
+			s.logger.Error("AI methodology template generation failed", "chapterID", chapterID, "error", err)
+			return sqlc.Chapter{}, fmt.Errorf("AI methodology template generation failed: %w", err)
+		}
 	default:
 		s.logger.Warn("Unsupported chapter type for AI generation", "type", chapterType)
 		return sqlc.Chapter{}, fmt.Errorf("AI generation not supported for chapter type: %s", chapterType)
 	}
 
-	if err != nil {
-		s.logger.Error("AI content generation failed", "chapterID", chapterID, "type", chapterType, "error", err)
-		return sqlc.Chapter{}, fmt.Errorf("AI generation failed: %w", err)
-	}
-
 	// Update the chapter with generated content
-	updateParams := apimodels.UpdateChapterRequest{
+	updateParams := apimodels.UpdateChapterRequest{ // Assuming apimodels.UpdateChapterRequest is suitable
 		Content: &generatedContent,
-		Status:  models.ToStringPtr("generated"), // status defined in your api model
+		Status:  models.ToStringPtr("generated"), // models.ToStringPtr from your existing code
 	}
+	// Use the existing s.UpdateChapter logic
 	return s.UpdateChapter(ctx, chapterID, projectID, userID, updateParams)
 }
 
@@ -695,4 +843,40 @@ func (s *ResearchService) updateDocStatus(ctx context.Context, docID uuid.UUID, 
 	if err != nil {
 		s.logger.Error("Failed to update document status in DB", "docID", docID, "error", err)
 	}
+}
+
+// SearchPapers facilitates paper search & selection for the frontend:
+func (s *ResearchService) SearchPapers(
+	ctx context.Context,
+	userID uuid.UUID, // To ensure user is authenticated, though project ownership might not be strict here yet
+	projectID uuid.UUID, // Optional: could be used to tailor search or just for logging
+	query string,
+	specialization string,
+	yearStart int,
+	limit int,
+) ([]apimodels.SemanticPaperResponse, error) { // Using your API model for response
+	s.logger.Info("Searching papers via Semantic Scholar", "userID", userID, "projectID", projectID, "query", query)
+
+	// Basic validation
+	if limit <= 0 || limit > 50 { // Max limit for Semantic Scholar is typically 100, but let's cap it
+		limit = 25 // Default limit
+	}
+	if yearStart <= 0 {
+		yearStart = time.Now().Year() - 5 // Default to last 5 years
+	}
+
+	semanticPapers, err := s.aiService.SearchSemanticScholar(ctx, query, specialization, yearStart) // `limit` is handled inside your current aiService.SearchSemanticScholar
+	if err != nil {
+		s.logger.Error("Failed to search Semantic Scholar", "query", query, "error", err)
+		return nil, fmt.Errorf("failed to search papers: %w", err)
+	}
+
+	// Transform to API response model
+	responsePapers := make([]apimodels.SemanticPaperResponse, 0, len(semanticPapers))
+	for _, paper := range semanticPapers {
+		responsePapers = append(responsePapers, ToSemanticPaperResponse(paper)) // You'll implement this
+	}
+
+	s.logger.Info("Successfully retrieved papers from Semantic Scholar", "count", len(responsePapers))
+	return responsePapers, nil
 }
