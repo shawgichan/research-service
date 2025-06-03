@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	applogger "github.com/shawgichan/research-service/go-backend/internal/logger" // aliased
-	"github.com/shawgichan/research-service/go-backend/internal/models"           // For placeholder references
+	"github.com/shawgichan/research-service/go-backend/internal/models"
 )
 
 // const openAIAPIURL = "https://api.openai.com/v1/chat/completions"
@@ -158,92 +159,147 @@ func (s *AIService) callOpenAI(ctx context.Context, request OpenAIRequest) (*Ope
 	return &openAIResp, nil
 }
 
-func (s *AIService) GenerateLiteratureReview(ctx context.Context, title, specialization string) (string, []*models.ReferenceResponse, error) {
-	s.logger.Info("Generating Literature Review", "title", title, "specialization", specialization)
-	prompt := fmt.Sprintf(`
-You are an academic research assistant. Generate a comprehensive literature review for a research thesis with the following details:
+// Refactor GenerateLiteratureReview Method:
+func (s *AIService) GenerateLiteratureReview(
+	ctx context.Context,
+	thesisTitle string,
+	specialization string, // Keep for context if needed, or if Semantic Scholar search needs it directly
+	selectedPapers []SemanticPaper, // Pass the actual paper objects selected by the user
+	targetWordCountPerSection int,
+) (string, []SemanticPaper, error) { // Return generated content AND the papers used for reference saving
+	s.logger.Info("Orchestrating Literature Review generation", "thesisTitle", thesisTitle, "numSelectedPapers", len(selectedPapers))
 
-Title: "%s"
-Specialization: %s
-
-Please provide:
-1. A well-structured literature review (target 1500-2000 words).
-2. Include at least 10-15 recent academic references (published between 2019 and the current year).
-3. Organize the content with appropriate subheadings.
-4. Follow academic writing standards.
-5. Include in-text citations in APA format (e.g., (Author, Year)).
-6. Conclude with a "References" section listing all cited works in APA format.
-
-The literature review should cover:
-- Current state of research in this area
-- Key theories and frameworks relevant to the title and specialization
-- Recent developments and findings
-- Gaps in existing research that this thesis might address
-- How this research potentially contributes to the field
-
-Format the response as a proper academic literature review.
-Ensure the "References" section is clearly demarcated at the end, like:
----REFERENCES_START---
-Author, A. A. (Year). Title of work. Publisher.
-Another, B. B. (Year). Title of article. Journal Title, volume(issue), pages.
----REFERENCES_END---
-`, title, specialization)
-
-	request := OpenAIRequest{
-		// Model: "gpt-4-turbo-preview", // Or "gpt-3.5-turbo" for faster/cheaper, "gpt-4" for higher quality
-		Model: "meta-llama/llama-4-scout-17b-16e-instruct",
-
-		Messages: []OpenAIMessage{
-			{Role: "system", Content: "You are an expert academic research assistant specializing in writing literature reviews."},
-			{Role: "user", Content: prompt},
-		},
-		MaxTokens:   3500, // Adjust as needed
-		Temperature: 0.6,  // Balance creativity and factualness
+	if len(selectedPapers) == 0 {
+		s.logger.Warn("No papers selected for literature review generation", "thesisTitle", thesisTitle)
+		return "No papers were selected to generate the literature review.", []SemanticPaper{}, nil // Or an error
 	}
 
-	openAIResp, err := s.callOpenAI(ctx, request)
+	// 1. Identify Themes from the selected papers
+	themes, err := s.IdentifyThemesFromAbstracts(ctx, thesisTitle, selectedPapers)
 	if err != nil {
-		return "", nil, fmt.Errorf("OpenAI API call failed: %w", err)
+		s.logger.Error("Failed to identify themes from abstracts", "thesisTitle", thesisTitle, "error", err)
+		return "", nil, fmt.Errorf("failed to identify themes: %w", err)
 	}
 
-	content := openAIResp.Choices[0].Message.Content
+	if len(themes) == 0 {
+		s.logger.Warn("No themes identified from abstracts. Generating a general review.", "thesisTitle", thesisTitle)
+		// Fallback: Generate a general review based on all selected papers if no themes found
+		// This could be a simpler prompt just asking to synthesize all provided abstracts.
+		// For now, we'll proceed assuming themes are found, or handle this as an error/empty result.
+		// Or, you could have a single call to GenerateLiteratureReviewSection with a generic "Overall Literature" theme.
+		// Let's make a single section if no themes.
+		if len(selectedPapers) > 0 {
+			s.logger.Info("No specific themes found, generating a single consolidated literature review section.", "thesisTitle", thesisTitle)
+			singleSectionContent, err := s.GenerateLiteratureReviewSection(ctx, thesisTitle, "Comprehensive Literature Summary", selectedPapers, targetWordCountPerSection*len(selectedPapers)/2) // Adjust word count
+			if err != nil {
+				s.logger.Error("Failed to generate single literature review section", "thesisTitle", thesisTitle, "error", err)
+				return "", nil, fmt.Errorf("failed to generate consolidated literature review section: %w", err)
+			}
+			return singleSectionContent, selectedPapers, nil
+		}
+		return "Could not identify themes and no papers to summarize directly.", nil, errors.New("no themes identified and no papers to summarize")
+	}
 
-	// TODO: Implement more robust reference extraction and parsing.
-	// For now, we use a placeholder.
-	extractedReferences := s.extractPlaceholderReferences(content, specialization)
+	s.logger.Info("Identified themes for literature review", "thesisTitle", thesisTitle, "themeCount", len(themes))
 
-	s.logger.Info("Literature Review generated successfully", "title", title)
-	return content, extractedReferences, nil
+	// 2. Loop through identified themes and generate sections
+	var literatureReviewContent strings.Builder
+	var papersActuallyUsedInSections = make(map[string]SemanticPaper) // To avoid duplicate reference saving
+
+	for _, theme := range themes {
+		s.logger.Info("Generating section for theme", "thesisTitle", thesisTitle, "themeName", theme.Name)
+		var relevantPapersForTheme []SemanticPaper
+		for _, paperID := range theme.PaperIDs {
+			for _, p := range selectedPapers {
+				if p.PaperID == paperID {
+					relevantPapersForTheme = append(relevantPapersForTheme, p)
+					papersActuallyUsedInSections[p.PaperID] = p // Track papers used
+					break
+				}
+			}
+		}
+
+		if len(relevantPapersForTheme) == 0 {
+			s.logger.Warn("No relevant papers found for theme, skipping section", "themeName", theme.Name)
+			continue
+		}
+
+		// Add theme heading (simple example, could be more sophisticated)
+		literatureReviewContent.WriteString(fmt.Sprintf("\n## %s\n\n", theme.Name))
+		if theme.Description != "" {
+			literatureReviewContent.WriteString(fmt.Sprintf("%s\n\n", theme.Description))
+		}
+
+		sectionContent, err := s.GenerateLiteratureReviewSection(ctx, thesisTitle, theme.Name, relevantPapersForTheme, targetWordCountPerSection)
+		if err != nil {
+			s.logger.Error("Failed to generate literature review section for theme", "themeName", theme.Name, "error", err)
+			// Decide: continue with other sections or fail the whole thing? For now, continue.
+			literatureReviewContent.WriteString(fmt.Sprintf("[Error generating content for theme: %s]\n\n", theme.Name))
+			continue
+		}
+		literatureReviewContent.WriteString(sectionContent)
+		literatureReviewContent.WriteString("\n\n")
+	}
+
+	finalUsedPapers := make([]SemanticPaper, 0, len(papersActuallyUsedInSections))
+	for _, paper := range papersActuallyUsedInSections {
+		finalUsedPapers = append(finalUsedPapers, paper)
+	}
+
+	s.logger.Info("Literature Review generation complete", "thesisTitle", thesisTitle)
+	return literatureReviewContent.String(), finalUsedPapers, nil
 }
 
-func (s *AIService) GenerateIntroduction(ctx context.Context, title, specialization, literatureReviewSummary string) (string, error) {
-	s.logger.Info("Generating Introduction", "title", title, "specialization", specialization)
+// Refactor GenerateIntroduction Method:
+// It now takes more context from the literature review process.
+func (s *AIService) GenerateIntroduction(
+	ctx context.Context,
+	title string,
+	specialization string,
+	literatureReviewSummary string, // A concise summary of the generated Lit Review
+	keyThemes []Theme, // Themes identified in the Lit Review
+	// researchGaps []string, // Potentially identified gaps (could be part of themes.Description or a separate AI step)
+) (string, error) {
+	s.logger.Info("Generating Introduction with enhanced context", "title", title)
+
+	var themesSection strings.Builder
+	if len(keyThemes) > 0 {
+		themesSection.WriteString("Key themes identified in the literature include:\n")
+		for _, theme := range keyThemes {
+			themesSection.WriteString(fmt.Sprintf("- %s: %s\n", theme.Name, theme.Description))
+		}
+	} else {
+		themesSection.WriteString("A comprehensive literature review was conducted.\n")
+	}
+
 	prompt := fmt.Sprintf(`
 You are an academic research assistant. Generate a compelling introduction chapter (target 800-1200 words) for a research thesis.
 
 Thesis Title: "%s"
 Specialization: %s
-Summary of Literature Review: %s
 
-The introduction should include:
-1. Background of the study: Briefly introduce the broader context.
-2. Problem statement: Clearly define the research problem or gap.
-3. Research questions and/or objectives: State what the research aims to investigate or achieve.
-4. Significance of the study: Explain the importance and potential contributions.
-5. Scope and limitations: Briefly outline the boundaries of the research.
-6. Structure of the thesis: Briefly outline the subsequent chapters.
+Context from Literature Review:
+%s
+%s
 
-Ensure academic tone and clarity.
-`, title, specialization, literatureReviewSummary)
+The introduction should include these clearly demarcated sections using markdown headings (e.g., "## Background of the Study"):
+1. ## Background of the Study: Briefly introduce the broader context, drawing from the literature.
+2. ## Problem Statement: Clearly define the research problem or gap, informed by the literature review.
+3. ## Research Questions and/or Objectives: State what the research aims to investigate or achieve. These should logically follow from the problem statement.
+4. ## Significance of the Study: Explain the importance and potential contributions.
+5. ## Scope and Limitations: Briefly outline the boundaries of the research. (Provide placeholders if details are unknown)
+6. ## Structure of the Thesis: Briefly outline the subsequent chapters (e.g., "Chapter 2 will present a detailed literature review...").
+
+Ensure academic tone and clarity. You may cite general concepts from the literature summary but do not invent specific paper citations unless they are explicitly provided in the literature summary.
+`, title, specialization, literatureReviewSummary, themesSection.String())
 
 	request := OpenAIRequest{
-		// Model: "gpt-4-turbo-preview",
-		Model: "meta-llama/llama-4-scout-17b-16e-instruct",
+		Model: "gpt-4", // Or your preferred model
 		Messages: []OpenAIMessage{
 			{Role: "system", Content: "You are an expert academic writer specializing in crafting thesis introductions."},
 			{Role: "user", Content: prompt},
 		},
-		MaxTokens:   2000,
+		MaxTokens:   2000, // Adjust as needed
 		Temperature: 0.7,
 	}
 
@@ -252,7 +308,7 @@ Ensure academic tone and clarity.
 		return "", fmt.Errorf("OpenAI API call for introduction failed: %w", err)
 	}
 
-	s.logger.Info("Introduction generated successfully", "title", title)
+	s.logger.Info("Introduction generated successfully with enhanced context", "title", title)
 	return openAIResp.Choices[0].Message.Content, nil
 }
 
@@ -473,6 +529,79 @@ Abstracts:
 	return resp.Choices[0].Message.Content, nil
 }
 
+func (s *AIService) GetSemanticPaperDetails(ctx context.Context, paperID string) (SemanticPaper, error) {
+	endpoint := fmt.Sprintf("https://api.semanticscholar.org/graph/v1/paper/%s", paperID)
+	fields := "paperId,title,authors,year,abstract,doi,journal,publicationTypes,externalIds,isOpenAccess,openAccessPdf" // Same fields as search
+
+	params := url.Values{}
+	params.Set("fields", fields)
+	reqUrl := fmt.Sprintf("%s?%s", endpoint, params.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
+	if err != nil {
+		return SemanticPaper{}, fmt.Errorf("failed to build request for paper details: %w", err)
+	}
+	if s.apiKey != "" { // Assuming apiKey is for Semantic Scholar, not OpenAI
+		req.Header.Set("x-api-key", s.apiKey)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return SemanticPaper{}, fmt.Errorf("failed to make request for paper details: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		s.logger.Error("Semantic Scholar paper details API error", "paperID", paperID, "status", resp.StatusCode, "body", string(bodyBytes))
+		return SemanticPaper{}, fmt.Errorf("unexpected status code from S2 paper details API: %d - %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var paper SemanticPaper
+	if err := json.NewDecoder(resp.Body).Decode(&paper); err != nil {
+		return SemanticPaper{}, fmt.Errorf("failed to decode paper details response: %w", err)
+	}
+	return paper, nil
+}
+
 // Helper for models.Reference (since fields are pointers)
 func ToStringPtr(s string) *string { return &s }
 func ToIntPtr(i int) *int          { return &i }
+
+func ToSemanticPaperResponse(paper SemanticPaper) models.SemanticPaperResponse {
+	var authors []string
+	for _, auth := range paper.Authors {
+		authors = append(authors, auth.Name)
+	}
+
+	var abstractStr string
+	if paper.Abstract != nil {
+		abstractStr = *paper.Abstract
+	}
+
+	var doiStr string
+	if paper.DOI != nil {
+		doiStr = *paper.DOI
+	}
+
+	var journalName string
+	if paper.Journal != nil {
+		journalName = paper.Journal.Name
+	}
+
+	var openAccessPdfUrl *string
+	if paper.OpenAccessPdf != nil && paper.OpenAccessPdf.Url != "" {
+		openAccessPdfUrl = &paper.OpenAccessPdf.Url
+	}
+
+	return models.SemanticPaperResponse{
+		PaperID:       paper.PaperID,
+		Title:         paper.Title,
+		Authors:       authors,
+		Year:          paper.Year,
+		Abstract:      abstractStr,
+		DOI:           doiStr,
+		Journal:       journalName,
+		OpenAccessPDF: openAccessPdfUrl,
+	}
+}

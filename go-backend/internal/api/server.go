@@ -106,6 +106,9 @@ func (s *Server) setupRoutes() {
 		projectRoutes.GET("/:project_id/references", s.listProjectReferences)
 		projectRoutes.DELETE("/:project_id/references/:reference_id", s.deleteReference)
 
+		// New route for searching papers related to a project
+		projectRoutes.GET("/:project_id/search-papers", s.searchPapersHandler) // Change to POST when request body gets complex
+
 		// Nested Document routes
 		projectRoutes.POST("/:project_id/documents/generate", s.generateDocumentHandler)
 		projectRoutes.GET("/:project_id/documents/:document_id/download", s.downloadDocumentHandler) // This would need file serving
